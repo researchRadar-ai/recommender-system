@@ -1,84 +1,96 @@
-import pytorch_lightning as pl
-from gensim.models import Word2Vec
-import torch
-from model import NRMS
-from typing import List
-from gaisTokenizer import Tokenizer
+import sys
+import pandas as pd
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR') # only show error messages
+
+from recommenders.utils.timer import Timer
+from recommenders.models.ncf.ncf_singlenode import NCF
+# from recommenders.models.ncf.dataset import Dataset as NCFDataset
+from dataset import Dataset as CustomDataset
+from recommenders.datasets import movielens
+from recommenders.utils.notebook_utils import is_jupyter
+
+from recommenders.datasets.python_splitters import python_chrono_split
+from recommenders.evaluation.python_evaluation import (rmse, mae, rsquared, exp_var, map_at_k, ndcg_at_k, precision_at_k, 
+                                                     recall_at_k, get_top_k_items)
+
+print("System version: {}".format(sys.version))
+print("Pandas version: {}".format(pd.__version__))
+print("Tensorflow version: {}".format(tf.__version__))
 
 
-class Model(pl.LightningModule):
-    def __init__(self, hparams):
-        super(Model, self).__init__()
-        self.w2v = Word2Vec.load(hparams['pretrained_model'])
-        self.w2id = {w: self.w2v.wv.vocab[w].index for w in self.w2v.wv.vocab}
+# top k items to recommend
+TOP_K = 10
 
-        if hparams['model']['dct_size'] == 'auto':
-            hparams['model']['dct_size'] = len(self.w2v.wv.vocab)
-        self.model = NRMS(hparams['model'], torch.tensor(self.w2v.wv.vectors))
-        self.hparams = hparams
-        self.maxlen = hparams['data']['maxlen']
-        self.tokenizer = Tokenizer('k95763565C5F785B50546754545D77505F0325160B58173C17291B3D5E2500135001671C06272B3B06281E1E5E55A9F7EB80C0E58AD1EB50AC')
+# Model parameters
+EPOCHS = 50
+BATCH_SIZE = 256
 
-    def forward(self, viewed, cands, topk):
-        """forward
-
-        Args:
-            viewed (tensor): [B, viewed_num, maxlen]
-            cands (tesnor): [B, cand_num, maxlen]
-        Returns:
-            val: [B] 0 ~ 1
-            idx: [B] 
-        """
-        logits = self.model(viewed, cands)
-        val, idx = logits.topk(topk)
-        return idx, val
-    
-    def predict_one(self, viewed, cands, topk):
-        """predict one user
-
-        Args:
-            viewed (List[List[str]]): 
-            cands (List[List[str]]): 
-        Returns:
-            topk of cands
-        """
-        viewed_token = torch.tensor([self.sent2idx(v) for v in viewed]).unsqueeze(0)
-        cands_token = torch.tensor([self.sent2idx(c) for c in cands]).unsqueeze(0)
-        idx, val = self(viewed_token, cands_token, topk)
-        val = val.squeeze().detach().cpu().tolist()
-
-        result = [cands[i] for i in idx.squeeze()]
-        return result, val
-    
-    def sent2idx(self, tokens: List[str]):
-        if ']' in tokens:
-            tokens = tokens[tokens.index(']'):]
-        tokens = [self.w2id[token.strip()]
-                  for token in tokens if token.strip() in self.w2id.keys()]
-        tokens += [0] * (self.maxlen - len(tokens))
-        tokens = tokens[:self.maxlen]
-        return tokens
-    
-    def tokenize(self, sents: str):
-        return self.tokenizer.tokenize(sents)
+SEED = 42
 
 
-def print_func(r):
-    for t in r:
-        print(''.join(t))
-    
-if __name__ == '__main__':
-    import json, random
-    with open('./data/articles.json', 'r') as f:
-        articles = json.loads(f.read())
-    with open('./data/users_list.json', 'r') as f:
-        users = json.loads(f.read())
-    nrms = Model.load_from_checkpoint('lightning_logs/ranger/v3/epoch=30-auroc=0.89.ckpt')
-    viewed = users[1001]['push'][:50]
-    viewed = [articles[v]['title'] for v in viewed]
-    print_func(viewed)
-    cands = [a['title'] for a in random.sample(articles, 20)] + viewed[:10]
-    result, val = nrms.predict_one(viewed, cands, 20)
-    print('result')
-    print_func(result)
-    print(val)
+# load dataset
+df = pd.read_csv('data/dataset.csv')
+
+# print(df.head())
+train, test = python_chrono_split(df, 0.75)
+
+
+train_file = "data/train.csv"
+test_file = "data/test.csv"
+train.to_csv(train_file, index=False)
+test.to_csv(test_file, index=False)
+
+data = CustomDataset(train_file=train_file, test_file=test_file, seed=SEED)
+
+
+model = NCF (
+    n_users=data.n_users, 
+    n_items=data.n_items,
+    model_type="NeuMF",
+    n_factors=4,
+    layer_sizes=[16,8,4],
+    n_epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    learning_rate=1e-3,
+    verbose=10,
+    seed=SEED
+)
+
+with Timer() as train_time:
+    model.fit(data)
+
+print("Took {} seconds for training.".format(train_time))
+
+
+with Timer() as test_time:
+    users, items, preds = [], [], []
+    item = list(train.itemID.unique())
+    for user in train.userID.unique():
+        user = [user] * len(item) 
+        users.extend(user)
+        items.extend(item)
+        preds.extend(list(model.predict(user, item, is_list=True)))
+
+    all_predictions = pd.DataFrame(data={"userID": users, "itemID":items, "prediction":preds})
+
+    merged = pd.merge(train, all_predictions, on=["userID", "itemID"], how="outer")
+    all_predictions = merged[merged.rating.isnull()].drop('rating', axis=1)
+
+print("Took {} seconds for prediction.".format(test_time))
+
+
+# Evaluate how well NCF performs
+eval_map = map_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_ndcg = ndcg_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_precision = precision_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_recall = recall_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+
+print("MAP:\t%f" % eval_map,
+      "NDCG:\t%f" % eval_ndcg,
+      "Precision@K:\t%f" % eval_precision,
+      "Recall@K:\t%f" % eval_recall, sep='\n')
+
+print("reach this point")
+
+
