@@ -5,7 +5,6 @@ tf.get_logger().setLevel('ERROR') # only show error messages
 
 from recommenders.utils.timer import Timer
 from recommenders.models.ncf.ncf_singlenode import NCF
-# from recommenders.models.ncf.dataset import Dataset as NCFDataset
 from dataset import Dataset as CustomDataset
 from recommenders.datasets import movielens
 from recommenders.utils.notebook_utils import is_jupyter
@@ -57,20 +56,21 @@ model = NCF (
     seed=SEED
 )
 
-with Timer() as train_time:
+with Timer() as train_time: # have to perform training, otherwise, got "AttributeError: 'NCF' object has no attribute 'user2id'"
     model.fit(data)
 
-print("Took {} seconds for training.".format(train_time))
+# print("Took {} seconds for training.".format(train_time))
 
 
 with Timer() as test_time:
     users, items, preds = [], [], []
     item = list(train.itemID.unique())
     for user in train.userID.unique():
-        user = [user] * len(item) 
+        user = [user] * len(item) # for a given user, output the probability of recommending each item
         users.extend(user)
         items.extend(item)
         preds.extend(list(model.predict(user, item, is_list=True)))
+        print("preds: ", len(preds))
 
     all_predictions = pd.DataFrame(data={"userID": users, "itemID":items, "prediction":preds})
 
@@ -78,6 +78,7 @@ with Timer() as test_time:
     all_predictions = merged[merged.rating.isnull()].drop('rating', axis=1)
 
 print("Took {} seconds for prediction.".format(test_time))
+print("predictions: ", all_predictions['prediction'].shape)
 
 
 # Evaluate how well NCF performs
@@ -90,7 +91,5 @@ print("MAP:\t%f" % eval_map,
       "NDCG:\t%f" % eval_ndcg,
       "Precision@K:\t%f" % eval_precision,
       "Recall@K:\t%f" % eval_recall, sep='\n')
-
-print("reach this point")
 
 

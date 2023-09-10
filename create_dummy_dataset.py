@@ -7,7 +7,7 @@ import pandas as pd
 
 
 '''
-    ProjectID PaperID Rating(0-10) Category Title Citation_Count Impact_Factor Time_Spent Number_of_Annotations
+    ProjectID PaperID Rating(1-10) Category Citation_Count Impact_Factor Time_Spent Number_of_Annotations
 '''
 def build_dataset_full(size):
 
@@ -17,7 +17,6 @@ def build_dataset_full(size):
                           random.randint(1, 1000), # PaperID
                           random.randint(1, 10), # Rating
                           random.randint(1, 20), # Category
-                          'paper_' + str(i), # Title
                           random.randint(10, 200), # Citation_Count
                           random.randint(1, 15), # Impact_Factor
                           random.randint(1, 100), # Time_Spent 
