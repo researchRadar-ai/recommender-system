@@ -11,11 +11,11 @@ from dataset import Dataset as CustomDataset
 user = 1
 paper = 1
 Category = 1
-Citation_Count = 1
+Citation_Count = 50
 Impact_Factor = 1
-Time_Spent = 1
+Time_Spent = 6
 Number_of_Annotations = 1
-input_data = [Category, Citation_Count, Impact_Factor, Time_Spent, Number_of_Annotations]
+input_data = torch.tensor([float(Category), Citation_Count, Impact_Factor, Time_Spent, Number_of_Annotations])
 
 
 # mapping from raw feature to rating
@@ -23,8 +23,7 @@ input_size = 5 # Number of features (Category Citation_Count Impact_Factor Time_
 hidden_size = 8
 rating_model = Rating_Model(input_size, hidden_size)
 
-# rate = rating_model(input_data)
-rating = int(sum(input_data) / len(input_data))
+rating = rating_model(input_data)
 
 print("rating: ", rating)
 
@@ -70,7 +69,6 @@ print("Took {} seconds for training.".format(train_time))
 with Timer() as test_time:
     users, items, preds = [], [], []
     item = list(train.itemID.unique())
-    print("test.userID.unique()", test.userID.unique())
     # for user in test.userID.unique():
     user = [user] * len(item) # for a given user, output the probability of recommending each item
     users.extend(user)
