@@ -1,48 +1,96 @@
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning.loggers import TensorBoardLogger
-from pytorch_lightning import Trainer
-from torch import dtype
-from config import hparams
-import os
-from train import Model
-from argparse import ArgumentParser
+import sys
+import pandas as pd
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR') # only show error messages
 
-parser = ArgumentParser('train args')
-parser.add_argument('--gpu', default='0')
-parser.add_argument('--epochs', default=50, type=int)
-args = parser.parse_args()
+from recommenders.utils.timer import Timer
+from recommenders.models.ncf.ncf_singlenode import NCF
+# from recommenders.models.ncf.dataset import Dataset as NCFDataset
+from dataset import Dataset as CustomDataset
+from recommenders.datasets import movielens
+from recommenders.utils.notebook_utils import is_jupyter
 
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+from recommenders.datasets.python_splitters import python_chrono_split
+from recommenders.evaluation.python_evaluation import (rmse, mae, rsquared, exp_var, map_at_k, ndcg_at_k, precision_at_k, 
+                                                     recall_at_k, get_top_k_items)
 
-model = Model(hparams)
-checkpoint_callback = ModelCheckpoint(
-    filepath=f'lightning_logs/{hparams["name"]}/{hparams["version"]}/' + '{epoch}-{auroc:.2f}',
-    save_top_k=3,
-    verbose=True,
-    monitor='auroc',
-    mode='max',
-    save_last=True
+print("System version: {}".format(sys.version))
+print("Pandas version: {}".format(pd.__version__))
+print("Tensorflow version: {}".format(tf.__version__))
+
+
+# top k items to recommend
+TOP_K = 10
+
+# Model parameters
+EPOCHS = 50
+BATCH_SIZE = 256
+
+SEED = 42
+
+
+# load dataset
+df = pd.read_csv('data/dataset.csv')
+
+# print(df.head())
+train, test = python_chrono_split(df, 0.75)
+
+
+train_file = "data/train.csv"
+test_file = "data/test.csv"
+train.to_csv(train_file, index=False)
+test.to_csv(test_file, index=False)
+
+data = CustomDataset(train_file=train_file, test_file=test_file, seed=SEED)
+
+
+model = NCF (
+    n_users=data.n_users, 
+    n_items=data.n_items,
+    model_type="NeuMF",
+    n_factors=4,
+    layer_sizes=[16,8,4],
+    n_epochs=EPOCHS,
+    batch_size=BATCH_SIZE,
+    learning_rate=1e-3,
+    verbose=10,
+    seed=SEED
 )
 
-early_stop = EarlyStopping(
-    monitor='auroc',
-    min_delta=0.001,
-    patience=5,
-    strict=False,
-    verbose=True,
-    mode='max'
-)
-logger = TensorBoardLogger(
-    save_dir='lightning_logs',
-    name=hparams['name'],
-    version=hparams["version"]
-)
+with Timer() as train_time:
+    model.fit(data)
 
-trainer = Trainer(max_epochs=args.epochs,
-                  gpus=1,
-                  early_stop_callback=early_stop,
-                  weights_summary='full',
-                  checkpoint_callback=checkpoint_callback,
-                  logger=logger)
+print("Took {} seconds for training.".format(train_time))
 
-trainer.fit(model)
+
+with Timer() as test_time:
+    users, items, preds = [], [], []
+    item = list(train.itemID.unique())
+    for user in train.userID.unique():
+        user = [user] * len(item) 
+        users.extend(user)
+        items.extend(item)
+        preds.extend(list(model.predict(user, item, is_list=True)))
+
+    all_predictions = pd.DataFrame(data={"userID": users, "itemID":items, "prediction":preds})
+
+    merged = pd.merge(train, all_predictions, on=["userID", "itemID"], how="outer")
+    all_predictions = merged[merged.rating.isnull()].drop('rating', axis=1)
+
+print("Took {} seconds for prediction.".format(test_time))
+
+
+# Evaluate how well NCF performs
+eval_map = map_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_ndcg = ndcg_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_precision = precision_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+eval_recall = recall_at_k(test, all_predictions, col_prediction='prediction', k=TOP_K)
+
+print("MAP:\t%f" % eval_map,
+      "NDCG:\t%f" % eval_ndcg,
+      "Precision@K:\t%f" % eval_precision,
+      "Recall@K:\t%f" % eval_recall, sep='\n')
+
+print("reach this point")
+
+
